@@ -44,14 +44,14 @@ class LLMMemoryEstimator:
     def __init__(self):
         self.api = HfApi()
 
-    def list_providers(self, task: str = "text-generation", limit: int = 50, interactive: bool = False):
+    def list_providers(self, task: Optional[str] = None, limit: int = 50, interactive: bool = False):
         """List ALL model providers/organizations from HuggingFace"""
-        print(f"\n🔍 Fetching providers (task={task})...")
+        print(f"\n🔍 Fetching providers (task={task or 'all'})...")
         
         try:
             # Fetch models and extract unique providers
             model_iterator = list_models(
-                filter=task,
+                filter=None if task == "all" else task,
                 sort="downloads",
                 direction=-1,
                 limit=500,  # Fetch more to get diverse providers
@@ -77,7 +77,7 @@ class LLMMemoryEstimator:
                 return self._interactive_provider_select(sorted_providers, task)
             else:
                 # Just list them
-                print(f"\nAll LLM Providers (task={task}, top {len(sorted_providers)}):")
+                print(f"\nAll LLM Providers (task={task or 'all'}, top {len(sorted_providers)}):")
                 print(f"{'Provider':<30} {'Models':>10}")
                 print("─" * 42)
                 
@@ -139,18 +139,72 @@ class LLMMemoryEstimator:
             print("\n\n❌ Cancelled")
             return None
 
-    def browse_interactive(self, task: str = "text-generation"):
+    def _interactive_task_select(self):
+        """Interactive task category selection"""
+        TASKS = [
+            "all",
+            "text-generation",
+            "text2text-generation",
+            "text-classification",
+            "token-classification",
+            "question-answering",
+            "translation",
+            "summarization",
+            "image-classification",
+            "object-detection",
+            "audio-classification",
+            "automatic-speech-recognition",
+            "text-to-image",
+            "image-text-to-text",
+            "feature-extraction",
+            "fill-mask",
+            "zero-shot-classification",
+        ]
+        
+        try:
+            print(f"\n{'='*60}")
+            print(f"📋 Select Model Category/Task")
+            print(f"{'='*60}")
+            print("Type to search, press Enter to select")
+            print("─" * 60)
+            print("💡 Tip: Select 'all' to browse all models")
+            
+            completer = FuzzyCompleter(WordCompleter(TASKS, ignore_case=True))
+            selected = prompt(
+                "Select task/category (default: all): ",
+                completer=completer,
+                complete_while_typing=True,
+                default="all",
+            )
+            
+            if selected and selected in TASKS:
+                task = None if selected == "all" else selected
+                print(f"\n✅ Selected: {selected}")
+                return task
+            else:
+                print(f"\n❌ Invalid selection, using 'all'")
+                return None
+                
+        except (KeyboardInterrupt, EOFError):
+            print("\n\n❌ Cancelled, using 'all'")
+            return None
+
+    def browse_interactive(self, task: Optional[str] = None):
         """Interactive browsing experience"""
         print(f"\n{'='*60}")
         print(f"🚀 LLMFit Interactive Browser")
         print(f"{'='*60}\n")
         
-        # Step 1: Select provider
+        # Step 1: Select task/category
+        if task is None:
+            task = self._interactive_task_select()
+        
+        # Step 2: Select provider
         provider = self.list_providers(task=task, interactive=True)
         if not provider:
             return
         
-        # Step 2: Get models from provider
+        # Step 3: Get models from provider
         print(f"\n🔍 Fetching models from {provider}...")
         models = self.list_models(provider=provider, limit=50, task=task)
         
@@ -158,17 +212,17 @@ class LLMMemoryEstimator:
             print(f"❌ No models found for {provider}")
             return
         
-        # Step 3: Select model interactively
+        # Step 4: Select model interactively
         selected_model = self._interactive_model_select(models)
         if not selected_model:
             return
         
-        # Step 4: Configure estimation
+        # Step 5: Configure estimation
         precision = self._interactive_precision_select()
         if not precision:
             return
         
-        # Step 5: Run estimation
+        # Step 6: Run estimation
         print(f"\n🎯 Estimating memory for {selected_model.name}...")
         self.estimate_memory(
             model_name=selected_model.name,
@@ -244,19 +298,21 @@ class LLMMemoryEstimator:
         max_params: Optional[float] = None,
         min_params: Optional[float] = None,
         limit: int = 20,
-        task: str = "text-generation",
+        task: Optional[str] = None,
     ) -> List[ModelInfo]:
         """List models from provider with optional size filtering"""
-        filters = {"task": task}
+        filters = {}
+        if task and task != "all":
+            filters["task"] = task
         if provider:
             filters["author"] = provider
 
-        print(f"\n🔍 Searching models (provider={provider or 'all'}, task={task})...")
+        print(f"\n🔍 Searching models (provider={provider or 'all'}, task={task or 'all'})...")
         
         models = []
         try:
             model_iterator = list_models(
-                filter=filters["task"],
+                filter=filters.get("task"),
                 author=filters.get("author"),
                 sort="downloads",
                 direction=-1,
@@ -475,7 +531,7 @@ def main():
         description="Estimate LLM memory requirements and browse models",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
+ Examples:
   # Interactive browser (like fzf)
   llmfit browse
   
@@ -485,11 +541,18 @@ Examples:
   # Check authentication status
   llmfit status
   
-  # List popular providers
+  # List popular providers (all categories)
   llmfit providers
   
-  # List models from Qwen under 7B
-  llmfit list Qwen --size "<7"
+  # List providers for specific task
+  llmfit providers --task text-generation
+  llmfit providers --task image-classification
+  
+  # List models from Qwen (all categories)
+  llmfit list Qwen
+  
+  # List models from Qwen under 7B (text-generation only)
+  llmfit list Qwen --size "<7" --task text-generation
   
   # List all models between 7-13B
   llmfit list --size "7-13" --limit 30
@@ -506,10 +569,11 @@ Examples:
     
     # Browse command (interactive mode)
     browse_parser = subparsers.add_parser('browse', help='Interactive browser (like fzf)')
-    browse_parser.add_argument('--task', default='text-generation', help='Model task (default: text-generation)')
+    browse_parser.add_argument('--task', default=None, help='Model task/category (default: all)')
     
     # Providers command
-    subparsers.add_parser('providers', help='List popular model providers')
+    providers_parser = subparsers.add_parser('providers', help='List popular model providers')
+    providers_parser.add_argument('--task', default=None, help='Filter by task/category (default: all)')
     
     # Login command
     subparsers.add_parser('login', help='Sign in to HuggingFace Hub')
@@ -525,7 +589,7 @@ Examples:
     list_parser.add_argument('provider', nargs='?', help='Provider name (e.g., Qwen, meta-llama)')
     list_parser.add_argument('--size', help='Size filter: <7, >=13, 7-13, =7')
     list_parser.add_argument('--limit', type=int, default=20, help='Max results (default: 20)')
-    list_parser.add_argument('--task', default='text-generation', help='Model task (default: text-generation)')
+    list_parser.add_argument('--task', default=None, help='Model task/category (default: all)')
     
     # Estimate command
     est_parser = subparsers.add_parser('estimate', help='Estimate memory for a model')
@@ -548,7 +612,7 @@ Examples:
         estimator.browse_interactive(task=args.task)
     
     elif args.command == 'providers':
-        estimator.list_providers()
+        estimator.list_providers(task=args.task)
     
     elif args.command == 'login':
         auth_manager = HFAuthManager()
