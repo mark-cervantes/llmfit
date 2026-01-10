@@ -1,4 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#     "torch>=2.0.0",
+#     "transformers>=4.30.0",
+#     "huggingface-hub>=0.16.0",
+#     "prompt-toolkit>=3.0.0",
+# ]
+# ///
+
 """
 llmfit - Estimate LLM memory requirements and browse models
 """
@@ -12,9 +22,12 @@ try:
     from huggingface_hub import HfApi, list_models
     from transformers import AutoConfig
     import torch
+    from prompt_toolkit import prompt
+    from prompt_toolkit.completion import FuzzyCompleter, WordCompleter
+    from prompt_toolkit.shortcuts import radiolist_dialog, button_dialog
 except ImportError:
     print("Error: Required packages not installed.")
-    print("Run: pip install torch transformers huggingface_hub")
+    print("Run: pip install torch transformers huggingface_hub prompt-toolkit")
     sys.exit(1)
 
 
@@ -39,23 +52,193 @@ class LLMMemoryEstimator:
     def __init__(self):
         self.api = HfApi()
 
-    def list_providers(self, task: str = "text-generation", limit: int = 50):
-        """List popular model providers/organizations"""
-        print(f"\nPopular LLM Providers (task={task}):")
+    def list_providers(self, task: str = "text-generation", limit: int = 50, interactive: bool = False):
+        """List ALL model providers/organizations from HuggingFace"""
+        print(f"\n🔍 Fetching providers (task={task})...")
         
-        # Hardcoded popular providers for speed (HF API doesn't list orgs directly)
-        popular = [
-            "meta-llama", "Qwen", "mistralai", "google", "microsoft",
-            "EleutherAI", "stabilityai", "tiiuae", "01-ai", "bigscience",
-            "bigcode", "Salesforce", "databricks", "upstage", "NousResearch",
-            "teknium", "Open-Orca", "TheBloke", "bartowski", "lmstudio-ai",
-        ]
+        try:
+            # Fetch models and extract unique providers
+            model_iterator = list_models(
+                filter=task,
+                sort="downloads",
+                direction=-1,
+                limit=500,  # Fetch more to get diverse providers
+            )
+            
+            # Count models per provider
+            provider_counts = {}
+            for model in model_iterator:
+                provider = model.id.split("/")[0] if "/" in model.id else model.id
+                provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            
+            # Sort by model count (popularity)
+            sorted_providers = sorted(
+                provider_counts.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:limit]
+            
+            providers = [p[0] for p in sorted_providers]
+            
+            if interactive:
+                # Interactive selection
+                return self._interactive_provider_select(sorted_providers, task)
+            else:
+                # Just list them
+                print(f"\nAll LLM Providers (task={task}, top {len(sorted_providers)}):")
+                print(f"{'Provider':<30} {'Models':>10}")
+                print("─" * 42)
+                
+                for provider, count in sorted_providers:
+                    print(f"{provider:<30} {count:>10}")
+                
+                print(f"\n✅ Found {len(providers)} providers")
+                print(f"Use: llmfit list <provider> to see models")
+                print(f"Or: llmfit browse for interactive mode")
+                return providers
+            
+        except Exception as e:
+            print(f"❌ Error fetching providers: {e}")
+            # Fallback to hardcoded list
+            print("\nFalling back to known providers:")
+            popular = [
+                "meta-llama", "Qwen", "mistralai", "google", "microsoft",
+                "EleutherAI", "stabilityai", "tiiuae", "01-ai", "bigscience",
+                "bigcode", "Salesforce", "databricks", "upstage", "NousResearch",
+                "teknium", "Open-Orca", "TheBloke", "bartowski", "lmstudio-ai",
+            ]
+            for i, org in enumerate(popular, 1):
+                print(f"  {i:2}. {org}")
+            return popular
+
+    def _interactive_provider_select(self, providers_with_counts, task):
+        """Interactive provider selection with fuzzy search"""
+        try:
+            # Create fuzzy searchable list
+            provider_names = [p[0] for p in providers_with_counts]
+            
+            print(f"\n{'='*60}")
+            print(f"🔍 Interactive Provider Browser")
+            print(f"{'='*60}")
+            print("Type to search, press Enter to select")
+            print("─" * 60)
+            
+            completer = FuzzyCompleter(WordCompleter(provider_names, ignore_case=True))
+            selected = prompt(
+                "Select provider (fuzzy search): ",
+                completer=completer,
+                complete_while_typing=True,
+            )
+            
+            if selected and selected in provider_names:
+                print(f"\n✅ Selected: {selected}")
+                return selected
+            else:
+                print(f"\n❌ Invalid selection")
+                return None
+                
+        except (KeyboardInterrupt, EOFError):
+            print("\n\n❌ Cancelled")
+            return None
+
+    def browse_interactive(self, task: str = "text-generation"):
+        """Interactive browsing experience"""
+        print(f"\n{'='*60}")
+        print(f"🚀 LLMFit Interactive Browser")
+        print(f"{'='*60}\n")
         
-        for i, org in enumerate(popular, 1):
-            print(f"  {i:2}. {org}")
+        # Step 1: Select provider
+        provider = self.list_providers(task=task, interactive=True)
+        if not provider:
+            return
         
-        print(f"\nUse: llmfit list <provider> to see models")
-        return popular
+        # Step 2: Get models from provider
+        print(f"\n🔍 Fetching models from {provider}...")
+        models = self.list_models(provider=provider, limit=50, task=task)
+        
+        if not models:
+            print(f"❌ No models found for {provider}")
+            return
+        
+        # Step 3: Select model interactively
+        selected_model = self._interactive_model_select(models)
+        if not selected_model:
+            return
+        
+        # Step 4: Configure estimation
+        precision = self._interactive_precision_select()
+        if not precision:
+            return
+        
+        # Step 5: Run estimation
+        print(f"\n🎯 Estimating memory for {selected_model.name}...")
+        self.estimate_memory(
+            model_name=selected_model.name,
+            precision=precision,
+            context_length=4096,
+            batch_size=1,
+        )
+
+    def _interactive_model_select(self, models: List[ModelInfo]):
+        """Interactive model selection with fuzzy search"""
+        try:
+            model_names = [m.name for m in models]
+            model_dict = {m.name: m for m in models}
+            
+            print(f"\n{'='*60}")
+            print(f"🔍 Model Browser ({len(models)} models)")
+            print(f"{'='*60}")
+            print("Type to search, press Enter to select")
+            print("─" * 60)
+            
+            completer = FuzzyCompleter(WordCompleter(model_names, ignore_case=True))
+            selected = prompt(
+                "Select model (fuzzy search): ",
+                completer=completer,
+                complete_while_typing=True,
+            )
+            
+            if selected and selected in model_dict:
+                model = model_dict[selected]
+                print(f"\n✅ Selected: {model.name} ({model.params_b:.1f}B)")
+                return model
+            else:
+                print(f"\n❌ Invalid selection")
+                return None
+                
+        except (KeyboardInterrupt, EOFError):
+            print("\n\n❌ Cancelled")
+            return None
+
+    def _interactive_precision_select(self):
+        """Interactive precision selection"""
+        try:
+            precisions = list(self.PRECISION_MAP.keys())
+            
+            print(f"\n{'='*60}")
+            print(f"⚙️  Select Quantization Precision")
+            print(f"{'='*60}")
+            print("Type to search, press Enter to select")
+            print("─" * 60)
+            
+            completer = FuzzyCompleter(WordCompleter(precisions, ignore_case=True))
+            selected = prompt(
+                "Select precision (default: 4bit): ",
+                completer=completer,
+                complete_while_typing=True,
+                default="4bit",
+            )
+            
+            if selected and selected in precisions:
+                print(f"\n✅ Selected: {selected}")
+                return selected
+            else:
+                print(f"\n❌ Invalid selection, using 4bit")
+                return "4bit"
+                
+        except (KeyboardInterrupt, EOFError):
+            print("\n\n❌ Cancelled, using 4bit")
+            return "4bit"
 
     def list_models(
         self,
@@ -283,6 +466,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Interactive browser (like fzf)
+  llmfit browse
+  
   # List popular providers
   llmfit providers
   
@@ -301,6 +487,10 @@ Examples:
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
+    
+    # Browse command (interactive mode)
+    browse_parser = subparsers.add_parser('browse', help='Interactive browser (like fzf)')
+    browse_parser.add_argument('--task', default='text-generation', help='Model task (default: text-generation)')
     
     # Providers command
     subparsers.add_parser('providers', help='List popular model providers')
@@ -329,7 +519,10 @@ Examples:
     
     estimator = LLMMemoryEstimator()
     
-    if args.command == 'providers':
+    if args.command == 'browse':
+        estimator.browse_interactive(task=args.task)
+    
+    elif args.command == 'providers':
         estimator.list_providers()
     
     elif args.command == 'list':
