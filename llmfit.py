@@ -1,14 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.9"
-# dependencies = [
-#     "torch>=2.0.0",
-#     "transformers>=4.30.0",
-#     "huggingface-hub>=0.16.0",
-#     "prompt-toolkit>=3.0.0",
-# ]
-# ///
-
+#!/home/cmark/.local/bin/llmfit-dir/.venv/bin/python3
 """
 llmfit - Estimate LLM memory requirements and browse models
 """
@@ -29,6 +19,8 @@ except ImportError:
     print("Error: Required packages not installed.")
     print("Run: pip install torch transformers huggingface_hub prompt-toolkit")
     sys.exit(1)
+
+from auth import HFAuthManager
 
 
 @dataclass
@@ -98,6 +90,12 @@ class LLMMemoryEstimator:
                 return providers
             
         except Exception as e:
+            error_str = str(e)
+            # Check for authentication errors
+            if any(code in error_str for code in ['401', '403', 'Unauthorized', 'Forbidden']):
+                auth_manager = HFAuthManager()
+                print(auth_manager.get_auth_error_message())
+                return []
             print(f"❌ Error fetching providers: {e}")
             # Fallback to hardcoded list
             print("\nFalling back to known providers:")
@@ -288,6 +286,12 @@ class LLMMemoryEstimator:
                     break
         
         except Exception as e:
+            error_str = str(e)
+            # Check for authentication errors
+            if any(code in error_str for code in ['401', '403', 'Unauthorized', 'Forbidden']):
+                auth_manager = HFAuthManager()
+                print(auth_manager.get_auth_error_message())
+                return []
             print(f"❌ Error fetching models: {e}")
             return []
 
@@ -334,6 +338,12 @@ class LLMMemoryEstimator:
         try:
             config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         except Exception as e:
+            error_str = str(e)
+            # Check for authentication errors (401/403)
+            if any(code in error_str for code in ['401', '403', 'Unauthorized', 'Forbidden']):
+                auth_manager = HFAuthManager()
+                print(auth_manager.get_auth_error_message(model_name))
+                return {}
             print(f"❌ Failed to load config: {e}")
             return {}
         
@@ -469,6 +479,12 @@ Examples:
   # Interactive browser (like fzf)
   llmfit browse
   
+  # Login to HuggingFace (required for gated models)
+  llmfit login
+  
+  # Check authentication status
+  llmfit status
+  
   # List popular providers
   llmfit providers
   
@@ -494,6 +510,15 @@ Examples:
     
     # Providers command
     subparsers.add_parser('providers', help='List popular model providers')
+    
+    # Login command
+    subparsers.add_parser('login', help='Sign in to HuggingFace Hub')
+    
+    # Logout command
+    subparsers.add_parser('logout', help='Sign out from HuggingFace Hub')
+    
+    # Status command
+    subparsers.add_parser('status', help='Check authentication status')
     
     # List command
     list_parser = subparsers.add_parser('list', help='List models from provider')
@@ -524,6 +549,20 @@ Examples:
     
     elif args.command == 'providers':
         estimator.list_providers()
+    
+    elif args.command == 'login':
+        auth_manager = HFAuthManager()
+        success = auth_manager.login_interactive()
+        sys.exit(0 if success else 1)
+    
+    elif args.command == 'logout':
+        auth_manager = HFAuthManager()
+        success = auth_manager.logout()
+        sys.exit(0 if success else 1)
+    
+    elif args.command == 'status':
+        auth_manager = HFAuthManager()
+        auth_manager.show_status()
     
     elif args.command == 'list':
         min_params, max_params = None, None
